@@ -58,6 +58,9 @@ Web dashboard:
 streamlit run app.py
 ```
 
+It opens on a provider chooser — M-Pesa, Airtel Money, or both — and themes the
+rest of the session to match.
+
 No statement to hand? Generate fictional ones:
 
 ```bash
@@ -117,6 +120,17 @@ it sits under. Position is the only thing that disambiguates.
 **Rule order matters.** `Customer Transfer Charge` contains both "transfer" and
 "charge". Charges are checked first, which keeps a KES 23 fee out of the
 money-sent total and off every percentage on the page.
+
+## A note on branding
+
+The dashboard uses colours approximating each provider's palette so the two
+flows are visually distinct. It deliberately does **not** ship or reproduce the
+Safaricom, M-Pesa or Airtel logos: those are registered trademarks, and
+embedding them in a public tool that reads financial statements invites a
+problem this project does not need. The icons are original.
+
+Official branding for a commercial version would need written permission from
+each operator.
 
 ## Privacy
 
