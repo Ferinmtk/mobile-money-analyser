@@ -38,70 +38,180 @@ THEMES = {
     "mpesa": {
         "label": "M-Pesa",
         "operator": "Safaricom",
-        "accent": "#3FA34D",
-        "accent_soft": "#1E3B25",
-        "ink": "#EAF7EC",
+        "accent": "#22B14C",        # Safaricom green
+        "accent_deep": "#0F7A32",
+        "rgb": "34, 177, 76",
         "blurb": "Safaricom M-Pesa statement",
     },
     "airtel": {
         "label": "Airtel Money",
         "operator": "Airtel",
-        "accent": "#D7263D",
-        "accent_soft": "#3B171D",
-        "ink": "#FDECEE",
+        "accent": "#E4002B",        # Airtel red
+        "accent_deep": "#9E0020",
+        "rgb": "228, 0, 43",
         "blurb": "Airtel Money statement",
     },
     "both": {
         "label": "Both wallets",
         "operator": "Combined",
         "accent": "#6C74C9",
-        "accent_soft": "#22243D",
-        "ink": "#ECEDF9",
+        "accent_deep": "#3F47A0",
+        "rgb": "108, 116, 201",
         "blurb": "M-Pesa and Airtel Money together",
     },
 }
+
+
+ORDER = ("mpesa", "airtel", "both")
 
 
 def theme() -> dict:
     return THEMES[st.session_state.get("provider", "both")]
 
 
-def inject_css(accent: str, soft: str) -> None:
+def inject_css(config: dict, landing_mode: bool = False) -> None:
+    """Theme the page. Alpha tints are used throughout so the same rules read
+    correctly against both the light and dark Streamlit themes."""
+    accent = config["accent"]
+    deep = config["accent_deep"]
+    rgb = config["rgb"]
+
+    # On the landing screen each column gets its own provider colour.
+    per_column = ""
+    if landing_mode:
+        for index, key in enumerate(ORDER, start=1):
+            card = THEMES[key]
+            per_column += f"""
+              div[data-testid="stHorizontalBlock"] > div:nth-child({index})
+              div.stButton > button {{
+                background: {card['accent']};
+                border-color: {card['accent']};
+                color: #FFFFFF;
+              }}
+              div[data-testid="stHorizontalBlock"] > div:nth-child({index})
+              div.stButton > button:hover {{
+                background: {card['accent_deep']};
+                border-color: {card['accent_deep']};
+                color: #FFFFFF;
+              }}
+            """
+
     st.markdown(
         f"""
         <style>
-          :root {{ --accent: {accent}; --accent-soft: {soft}; }}
+          :root {{
+            --accent: {accent};
+            --accent-deep: {deep};
+            --accent-rgb: {rgb};
+          }}
 
-          .provider-card {{
-            border: 1px solid var(--accent);
-            border-radius: 14px;
-            padding: 26px 22px 20px 22px;
-            background: linear-gradient(160deg, var(--accent-soft), transparent 85%);
-            min-height: 210px;
+          /* brand band and a tint that fades out, readable on either theme */
+          .stApp::before {{
+            content: "";
+            position: fixed; top: 0; left: 0; right: 0; height: 5px;
+            background: linear-gradient(90deg, {deep}, {accent} 55%, {deep});
+            z-index: 999;
           }}
-          .provider-card h3 {{ margin: 12px 0 2px 0; font-size: 1.35rem; }}
-          .provider-card .brand-logo {{ display:block; margin-bottom: 4px; }}
-          .provider-card .operator {{
-            font-size: 0.78rem; letter-spacing: .09em; text-transform: uppercase;
-            opacity: .72;
+          .stApp {{
+            background-image: linear-gradient(
+              180deg, rgba({rgb}, .13) 0px, rgba({rgb}, 0) 380px);
           }}
-          .provider-card p {{ font-size: .92rem; opacity: .82; margin-top: 10px; }}
+
+          section[data-testid="stSidebar"] {{
+            background-image: linear-gradient(
+              180deg, rgba({rgb}, .14), rgba({rgb}, 0) 60%);
+            border-right: 1px solid rgba({rgb}, .40);
+          }}
+          section[data-testid="stSidebar"] h2 {{ color: {accent}; }}
+
+          h1, h2, h3 {{ letter-spacing: -0.02em; }}
+          .rule {{
+            height: 4px; width: 72px; border-radius: 2px;
+            background: linear-gradient(90deg, {accent}, rgba({rgb}, 0));
+            margin: 6px 0 20px 0;
+          }}
+
+          [data-testid="stMetric"] {{
+            background: rgba({rgb}, .10);
+            border: 1px solid rgba({rgb}, .35);
+            border-left: 4px solid {accent};
+            border-radius: 12px;
+            padding: 14px 16px;
+          }}
+          [data-testid="stMetricValue"] {{ color: {accent}; font-weight: 700; }}
 
           div.stButton > button {{
             width: 100%;
-            border: 1px solid var(--accent);
-            background: transparent;
-            font-weight: 600;
+            background: {accent};
+            border: 1px solid {accent};
+            color: #FFFFFF;
+            font-weight: 700;
+            border-radius: 10px;
+            transition: background .15s ease, transform .15s ease;
           }}
           div.stButton > button:hover {{
-            background: var(--accent);
-            border-color: var(--accent);
-            color: #0b0b0b;
+            background: {deep};
+            border-color: {deep};
+            color: #FFFFFF;
+            transform: translateY(-1px);
+          }}
+          div.stButton > button p {{ color: #FFFFFF !important; font-weight: 700; }}
+
+          div.stDownloadButton > button {{
+            background: transparent;
+            border: 1.5px solid {accent};
+            color: {accent};
+            border-radius: 10px;
+            font-weight: 600;
+          }}
+          div.stDownloadButton > button:hover {{
+            background: {accent};
+            color: #FFFFFF;
           }}
 
-          [data-testid="stMetricValue"] {{ color: var(--accent); }}
-          .rule {{ height: 3px; width: 54px; background: var(--accent);
-                   border-radius: 2px; margin: 4px 0 18px 0; }}
+          .stTabs [aria-selected="true"] {{
+            color: {accent} !important;
+            border-bottom-color: {accent} !important;
+          }}
+
+          /* alerts: keep Streamlit's own text colour, restyle the frame only */
+          div[data-testid="stAlert"] {{
+            background: rgba({rgb}, .12);
+            border: 1px solid rgba({rgb}, .38);
+            border-left: 4px solid {accent};
+            border-radius: 10px;
+          }}
+
+          .provider-card {{
+            border: 1.5px solid rgba(var(--card-rgb), .55);
+            border-radius: 16px;
+            padding: 26px 22px 22px 22px;
+            background: linear-gradient(
+              158deg, rgba(var(--card-rgb), .20), rgba(var(--card-rgb), .04));
+            min-height: 214px;
+            transition: transform .16s ease, box-shadow .16s ease;
+          }}
+          .provider-card:hover {{
+            transform: translateY(-3px);
+            box-shadow: 0 12px 30px rgba(0, 0, 0, .18);
+          }}
+          .provider-card h3 {{ margin: 12px 0 2px 0; font-size: 1.4rem; }}
+          .provider-card .brand-logo {{ display: block; margin-bottom: 6px; }}
+          .provider-card .operator {{
+            font-size: .76rem; letter-spacing: .11em; text-transform: uppercase;
+            font-weight: 800;
+          }}
+          .provider-card p {{ font-size: .92rem; opacity: .85; margin-top: 10px; }}
+
+          .brand-chip {{
+            display: inline-block; padding: 5px 14px; border-radius: 999px;
+            font-size: .72rem; font-weight: 800; letter-spacing: .1em;
+            text-transform: uppercase;
+            border: 1.5px solid rgba({rgb}, .55);
+            background: rgba({rgb}, .14);
+            color: {accent};
+          }}
+          {per_column}
         </style>
         """,
         unsafe_allow_html=True,
@@ -140,7 +250,7 @@ def brand_mark(colour: str, variant: str) -> str:
     if logo:
         return (
             f'<img src="{logo}" alt="" class="brand-logo" '
-            f'style="height:56px;width:auto;border-radius:10px;" />'
+            f'style="height:58px;width:auto;border-radius:12px;" />'
         )
     return wallet_icon(colour, variant)
 
@@ -172,7 +282,7 @@ def wallet_icon(colour: str, variant: str) -> str:
 # --- landing ---------------------------------------------------------------
 
 def landing() -> None:
-    inject_css(THEMES["both"]["accent"], THEMES["both"]["accent_soft"])
+    inject_css(THEMES["both"], landing_mode=True)
 
     st.title("Mobile Money Analyser")
     st.markdown('<div class="rule"></div>', unsafe_allow_html=True)
@@ -184,15 +294,12 @@ def landing() -> None:
     st.write("")
 
     columns = st.columns(3, gap="medium")
-    for column, key in zip(columns, ("mpesa", "airtel", "both")):
+    for column, key in zip(columns, ORDER):
         config = THEMES[key]
         with column:
             st.markdown(
                 f"""
-                <div class="provider-card" style="
-                     border-color:{config['accent']};
-                     background: linear-gradient(160deg, {config['accent_soft']},
-                     transparent 85%);">
+                <div class="provider-card" style="--card-rgb: {config['rgb']};">
                   {brand_mark(config['accent'], key)}
                   <div class="operator" style="color:{config['accent']}">
                     {config['operator']}
@@ -225,7 +332,7 @@ def money(value: float | None) -> str:
 def analysis_view() -> None:
     config = theme()
     key = st.session_state["provider"]
-    inject_css(config["accent"], config["accent_soft"])
+    inject_css(config)
 
     header, back = st.columns([5, 1])
     with header:
@@ -239,6 +346,10 @@ def analysis_view() -> None:
             )
         else:
             st.title(config["label"])
+        st.markdown(
+            f'<span class="brand-chip">{config["operator"]}</span>',
+            unsafe_allow_html=True,
+        )
         st.markdown('<div class="rule"></div>', unsafe_allow_html=True)
     with back:
         st.write("")
