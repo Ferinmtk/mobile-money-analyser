@@ -1,0 +1,23 @@
+[project]
+name = "mobile-money-analyzer"
+version = "0.2.0"
+description = "Parse M-Pesa and Airtel Money PDF statements and analyse spending"
+requires-python = ">=3.10"
+dependencies = ["pandas>=2.0", "pdfplumber>=0.11"]
+
+[project.optional-dependencies]
+dashboard = ["streamlit>=1.30"]
+dev = ["pytest>=8.0", "reportlab>=4.0"]
+
+[project.scripts]
+mobile-money = "mobile_money.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
