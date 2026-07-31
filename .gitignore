@@ -10,6 +10,7 @@ venv/
 # Never commit real statements or exported data
 *.pdf
 !sample_*.pdf
+!docs/*.pdf
 *.csv
 
 # Brand logos are trademarks — keep them local, do not redistribute
