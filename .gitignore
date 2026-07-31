@@ -14,5 +14,4 @@ venv/
 *.csv
 
 # Brand logos are trademarks — keep them local, do not redistribute
-assets/*
-!assets/README.md
+
