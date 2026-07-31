@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-label="Mobile Money Analyser">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0E1117"/>
+      <stop offset="55%" stop-color="#12161F"/>
+      <stop offset="100%" stop-color="#0B0E14"/>
+    </linearGradient>
+    <linearGradient id="sweep" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#3FA34D"/>
+      <stop offset="52%" stop-color="#6C74C9"/>
+      <stop offset="100%" stop-color="#D7263D"/>
+    </linearGradient>
+    <linearGradient id="fadeG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#3FA34D" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#3FA34D" stop-opacity="0.12"/>
+    </linearGradient>
+    <linearGradient id="fadeR" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#D7263D" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#D7263D" stop-opacity="0.12"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="300" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1200" height="4" fill="url(#sweep)"/>
+
+  <!-- abstract statement rows, not any provider's mark -->
+  <g opacity="0.28">
+    <rect x="742" y="86"  width="128" height="9" rx="4.5" fill="#8A93A6"/>
+    <rect x="742" y="112" width="196" height="9" rx="4.5" fill="#8A93A6"/>
+    <rect x="742" y="138" width="152" height="9" rx="4.5" fill="#8A93A6"/>
+    <rect x="742" y="164" width="214" height="9" rx="4.5" fill="#8A93A6"/>
+    <rect x="742" y="190" width="118" height="9" rx="4.5" fill="#8A93A6"/>
+  </g>
+
+  <!-- category bars: the output, in the two brand hues -->
+  <g>
+    <rect x="990" y="150" width="26" height="72"  rx="6" fill="url(#fadeG)"/>
+    <rect x="1028" y="118" width="26" height="104" rx="6" fill="url(#fadeG)"/>
+    <rect x="1066" y="92"  width="26" height="130" rx="6" fill="url(#fadeR)"/>
+    <rect x="1104" y="136" width="26" height="86"  rx="6" fill="url(#fadeR)"/>
+    <line x1="982" y1="230" x2="1140" y2="230" stroke="#2A3040" stroke-width="2"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="72" y="128" font-family="Helvetica,Arial,sans-serif" font-size="54"
+        font-weight="700" fill="#F2F4F8" letter-spacing="-0.5">
+    Mobile Money Analyser
+  </text>
+  <rect x="74" y="150" width="66" height="4" rx="2" fill="url(#sweep)"/>
+  <text x="72" y="192" font-family="Helvetica,Arial,sans-serif" font-size="21"
+        fill="#98A2B3">
+    Turn M-Pesa and Airtel Money PDF statements into a spending breakdown.
+  </text>
+  <text x="72" y="224" font-family="Helvetica,Arial,sans-serif" font-size="21"
+        fill="#98A2B3">
+    Runs entirely on your own machine.
+  </text>
+
+  <g font-family="Helvetica,Arial,sans-serif" font-size="14" font-weight="600">
+    <rect x="72" y="248" width="104" height="28" rx="14" fill="none" stroke="#3FA34D"/>
+    <text x="124" y="267" fill="#3FA34D" text-anchor="middle">M-PESA</text>
+    <rect x="188" y="248" width="132" height="28" rx="14" fill="none" stroke="#D7263D"/>
+    <text x="254" y="267" fill="#D7263D" text-anchor="middle">AIRTEL MONEY</text>
+    <rect x="332" y="248" width="118" height="28" rx="14" fill="none" stroke="#6C74C9"/>
+    <text x="391" y="267" fill="#6C74C9" text-anchor="middle">PYTHON 3.10+</text>
+  </g>
+</svg>
