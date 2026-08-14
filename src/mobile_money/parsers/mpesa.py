@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import re
 
-import pdfplumber
-
-from .base import Statement, StatementError, clean, masked_account, normalise
+from .base import Statement, clean, parse_pdf
 
 NAME = "M-Pesa"
 
@@ -87,27 +85,10 @@ def _from_text(page) -> list[dict]:
 
 
 def parse(path, password: str | None = None) -> Statement:
-    rows: list[dict] = []
-    first_page_text = ""
-    try:
-        with pdfplumber.open(path, password=password) as pdf:
-            pages = len(pdf.pages)
-            for index, page in enumerate(pdf.pages):
-                if index == 0:
-                    first_page_text = page.extract_text() or ""
-                rows.extend(_from_tables(page) or _from_text(page))
-    except Exception as exc:
-        raise StatementError(f"Could not read M-Pesa statement: {exc}") from exc
-
-    if not rows:
-        raise StatementError("No M-Pesa transactions found in this file.")
-
-    warnings: list[str] = []
-    return Statement(
-        transactions=normalise(rows, NAME, warnings),
-        source=str(path),
-        provider=NAME,
-        pages=pages,
-        account=masked_account(first_page_text),
-        warnings=warnings,
+    return parse_pdf(
+        path,
+        password,
+        NAME,
+        lambda page, index: _from_tables(page) or _from_text(page),
+        "No M-Pesa transactions found in this file.",
     )

@@ -10,7 +10,9 @@ reversals are checked before the broader transfer patterns.
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 import pandas as pd
 
@@ -45,20 +47,48 @@ RULES: list[tuple[str, re.Pattern[str]]] = [
 
 UNCATEGORISED = "Other"
 
+# Optional user rules: a JSON object of {"regex pattern": "Category"} entries.
+# They are checked before the built-in rules, so a user can claim their
+# landlord, local shop or chama out of 'Other' — or override a builtin.
+USER_RULES_FILE = Path.home() / ".mobile-money" / "rules.json"
 
-def categorise_one(details: str) -> str:
+Rules = list[tuple[str, re.Pattern[str]]]
+
+
+def load_user_rules(path: str | Path | None = None) -> Rules:
+    """Load user categorisation rules; missing file means no extra rules."""
+    target = Path(path) if path else USER_RULES_FILE
+    if not target.exists():
+        return []
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+        return [
+            (str(category), re.compile(str(pattern), re.I))
+            for pattern, category in data.items()
+        ]
+    except (json.JSONDecodeError, re.error) as exc:
+        raise ValueError(f"Could not read rules from {target}: {exc}") from exc
+
+
+def categorise_one(details: str, extra_rules: Rules | None = None) -> str:
     """Return the category for a single Details string."""
     text = details or ""
-    for label, pattern in RULES:
+    for label, pattern in (extra_rules or []) + RULES:
         if pattern.search(text):
             return label
     return UNCATEGORISED
 
 
-def categorise(frame: pd.DataFrame, column: str = "details") -> pd.DataFrame:
+def categorise(
+    frame: pd.DataFrame,
+    column: str = "details",
+    extra_rules: Rules | None = None,
+) -> pd.DataFrame:
     """Add a `category` column to a transactions DataFrame."""
     result = frame.copy()
-    result["category"] = result[column].fillna("").map(categorise_one)
+    result["category"] = result[column].fillna("").map(
+        lambda text: categorise_one(text, extra_rules)
+    )
     return result
 
 

@@ -12,9 +12,10 @@
 <p align="center">
   <img src="https://img.shields.io/badge/M--Pesa-supported-3FA34D?style=flat-square" alt="M-Pesa supported">
   <img src="https://img.shields.io/badge/Airtel%20Money-supported-D7263D?style=flat-square" alt="Airtel Money supported">
+  <img src="https://img.shields.io/badge/T--Kash-supported-1D6FF2?style=flat-square" alt="T-Kash supported">
   <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/Streamlit-dashboard-FF4B4B?style=flat-square&logo=streamlit&logoColor=white" alt="Streamlit dashboard">
-  <img src="https://img.shields.io/badge/tests-65%20passing-2EA043?style=flat-square" alt="65 tests passing">
+  <img src="https://github.com/Ferinmtk/mobile-money-analyser/actions/workflows/ci.yml/badge.svg" alt="CI status">
   <img src="https://img.shields.io/badge/licence-MIT-6C74C9?style=flat-square" alt="MIT licence">
 </p>
 
@@ -50,7 +51,8 @@ Cross-network Transfer   KES  42,386.66    4.6%  ( 9 txns)
 ## What it does
 
 - **Reads the PDF** — including password-protected M-Pesa statements
-- **Detects the provider** automatically, M-Pesa or Airtel Money
+- **Detects the provider** automatically — M-Pesa, Airtel Money or T-Kash —
+  and re-analyses CSVs previously exported from this tool
 - **Categorises every transaction** into 18 categories tuned for Kenyan
   merchants: KPLC, Nairobi Water, Naivas, Quickmart, Fuliza, M-Shwari, DSTV
 - **Extracts the counterparty**, so you see `KPLC PREPAID` rather than
@@ -212,10 +214,12 @@ operator.
 pytest
 ```
 
-65 tests covering provider detection, both Airtel layouts, merging, direction
+The suite covers provider detection, both Airtel layouts, merging, direction
 inference, money-string edge cases (`(500.00)`, `250.00 DR`, `KES 3,400.50`),
-date formats, category rule ordering and every analysis function. All run
-against generated statements, so no real financial data is involved.
+date formats, category rule ordering, balance reconciliation and every
+analysis function. All tests run against generated statements, so no real
+financial data is involved. CI runs them on every push across Python
+3.10–3.13.
 
 ## FAQ
 

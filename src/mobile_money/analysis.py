@@ -6,14 +6,19 @@ the rows came from M-Pesa, Airtel Money, or both merged together.
 
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 
-from .categories import categorise, counterparty
+from .categories import Rules, categorise, counterparty
 
 
-def prepare(frame: pd.DataFrame) -> pd.DataFrame:
-    """Add category, counterparty and period columns used by every summary."""
-    result = categorise(frame)
+def prepare(frame: pd.DataFrame, extra_rules: Rules | None = None) -> pd.DataFrame:
+    """Add category, counterparty and period columns used by every summary.
+
+    `extra_rules` are user categorisation rules, checked before the builtins.
+    """
+    result = categorise(frame, extra_rules=extra_rules)
     result["counterparty"] = result["details"].fillna("").map(counterparty)
     result["month"] = result["completion_time"].dt.to_period("M").astype(str)
     result["day"] = result["completion_time"].dt.date
@@ -21,16 +26,58 @@ def prepare(frame: pd.DataFrame) -> pd.DataFrame:
     result["hour"] = result["completion_time"].dt.hour
     if "provider" not in result.columns:
         result["provider"] = "Unknown"
-    return result
+    return mark_self_transfers(result)
+
+
+def mark_self_transfers(
+    frame: pd.DataFrame, window_minutes: int = 10
+) -> pd.DataFrame:
+    """Flag transfers between the user's own wallets in a multi-wallet frame.
+
+    Moving KES 5,000 from M-Pesa to your own Airtel Money is not income and
+    not spending, but a naive sum counts it as both. A cross-network outgoing
+    row is paired with an incoming row of the same amount on a different
+    provider within a few minutes; both get `self_transfer = True` and every
+    summary excludes them (see `settled`).
+    """
+    frame["self_transfer"] = False
+    if frame["provider"].nunique() < 2:
+        return frame
+
+    window = pd.Timedelta(minutes=window_minutes)
+    outgoing = frame[
+        (frame["category"] == "Cross-network Transfer") & (frame["withdrawn"] > 0)
+    ]
+    incoming = frame[frame["paid_in"] > 0]
+
+    claimed: set = set()
+    for index, row in outgoing.iterrows():
+        matches = incoming[
+            (incoming["provider"] != row["provider"])
+            & (~incoming.index.isin(claimed))
+            & ((incoming["paid_in"] - row["withdrawn"]).abs() < 0.01)
+            & ((incoming["completion_time"] - row["completion_time"]).abs() <= window)
+        ]
+        if matches.empty:
+            continue
+        partner = matches.index[0]
+        claimed.add(partner)
+        frame.loc[[index, partner], "self_transfer"] = True
+
+    return frame
 
 
 def settled(frame: pd.DataFrame) -> pd.DataFrame:
-    """Only the rows where money actually moved.
+    """Only the rows where money actually moved in or out of the user's life.
 
-    Every summary sums over this same population so the category table, the
-    monthly trend and the overview all agree with each other.
+    Excludes failed/pending/reversed rows and transfers between the user's
+    own wallets. Every summary sums over this same population so the category
+    table, the monthly trend and the overview all agree with each other.
     """
-    return frame[frame["status"] == "COMPLETED"]
+    rows = frame[frame["status"] == "COMPLETED"]
+    if "self_transfer" in rows.columns:
+        rows = rows[~rows["self_transfer"]]
+    return rows
 
 
 def reconcile(frame: pd.DataFrame) -> dict[str, int] | None:
@@ -184,6 +231,104 @@ def by_hour(frame: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
+RECURRING_COLUMNS = [
+    "counterparty",
+    "months",
+    "typical_amount",
+    "monthly_commitment",
+    "total",
+    "transactions",
+]
+
+
+def recurring(
+    frame: pd.DataFrame, min_months: int = 3, max_variation: float = 0.35
+) -> pd.DataFrame:
+    """Regular outgoing payments: rent, school fees, subscriptions, chama.
+
+    A counterparty qualifies when it is paid in at least `min_months`
+    distinct months and the amounts are steady (coefficient of variation at
+    most `max_variation`). `monthly_commitment` is the median month's total —
+    the number to reach for when asking "what am I committed to every month".
+    """
+    rows = settled(frame)
+    out = rows[(rows["withdrawn"] > 0) & (rows["counterparty"] != "Unknown")]
+
+    found: list[dict] = []
+    for name, group in out.groupby("counterparty"):
+        months = int(group["month"].nunique())
+        if months < min_months:
+            continue
+        mean = float(group["withdrawn"].mean())
+        deviation = float(group["withdrawn"].std(ddof=0))
+        if mean <= 0 or deviation / mean > max_variation:
+            continue
+        per_month = group.groupby("month")["withdrawn"].sum()
+        found.append(
+            {
+                "counterparty": name,
+                "months": months,
+                "typical_amount": float(group["withdrawn"].median()),
+                "monthly_commitment": float(per_month.median()),
+                "total": float(group["withdrawn"].sum()),
+                "transactions": int(len(group)),
+            }
+        )
+
+    result = pd.DataFrame(found, columns=RECURRING_COLUMNS)
+    if result.empty:
+        return result
+    return result.sort_values(
+        "monthly_commitment", ascending=False
+    ).reset_index(drop=True)
+
+
+# Product name -> pattern over the details string. Checked in order; first
+# match wins, so the named products come before the generic loan words.
+LOAN_PRODUCTS: list[tuple[str, re.Pattern[str]]] = [
+    ("Fuliza", re.compile(r"fuliza", re.I)),
+    ("M-Shwari", re.compile(r"m-?shwari", re.I)),
+    ("KCB M-Pesa", re.compile(r"kcb\s*m-?pesa", re.I)),
+    ("Other loans & savings", re.compile(r"\b(?:loan|overdraft|lock savings|kopa|sacco)\b", re.I)),
+]
+
+LOAN_FEE = re.compile(r"\b(?:charges?|fees?|interest|access)\b", re.I)
+
+
+def loans(frame: pd.DataFrame) -> pd.DataFrame:
+    """Borrowing and savings activity per product.
+
+    For a credit product (Fuliza), `to_you` is what you borrowed and
+    `from_you` what you repaid; for a savings product (M-Shwari lock), the
+    directions read the other way. `fees` is the cost of using it — for
+    Fuliza-heavy statements this number is the story.
+    """
+    rows = settled(frame)
+    results: list[dict] = []
+    matched = pd.Series(False, index=rows.index)
+
+    for product, pattern in LOAN_PRODUCTS:
+        hits = rows["details"].str.contains(pattern, regex=True) & ~matched
+        matched |= hits
+        group = rows[hits]
+        if group.empty:
+            continue
+        fee_rows = group["details"].str.contains(LOAN_FEE, regex=True)
+        results.append(
+            {
+                "product": product,
+                "to_you": float(group["paid_in"].sum()),
+                "from_you": float(group.loc[~fee_rows, "withdrawn"].sum()),
+                "fees": float(group.loc[fee_rows, "withdrawn"].sum()),
+                "transactions": int(len(group)),
+            }
+        )
+
+    return pd.DataFrame(
+        results, columns=["product", "to_you", "from_you", "fees", "transactions"]
+    )
+
+
 def forecast_next_month(frame: pd.DataFrame) -> dict[str, float | str]:
     """Project next month's spend from the trend so far.
 
@@ -248,6 +393,33 @@ def insights(frame: pd.DataFrame) -> list[str]:
         notes.append(
             f"Biggest category: {top['category']} at KES {top['spent']:,.0f} "
             f"across {int(top['transactions'])} transactions."
+        )
+
+    regular = recurring(frame)
+    if not regular.empty:
+        commitment = float(regular["monthly_commitment"].sum())
+        notes.append(
+            f"You are committed to about KES {commitment:,.0f} every month "
+            f"across {len(regular)} regular payments "
+            f"(biggest: {regular.iloc[0]['counterparty']})."
+        )
+
+    borrowing = loans(frame)
+    fuliza = borrowing[borrowing["product"] == "Fuliza"]
+    if not fuliza.empty and float(fuliza.iloc[0]["fees"]) > 0:
+        row = fuliza.iloc[0]
+        notes.append(
+            f"Fuliza cost you KES {row['fees']:,.0f} in fees on "
+            f"KES {row['to_you']:,.0f} borrowed."
+        )
+
+    if "self_transfer" in frame.columns and frame["self_transfer"].any():
+        moved = float(
+            frame.loc[frame["self_transfer"], "withdrawn"].sum()
+        )
+        notes.append(
+            f"KES {moved:,.0f} moved between your own wallets and is "
+            "excluded from income and spending totals."
         )
 
     week = by_weekday(frame)

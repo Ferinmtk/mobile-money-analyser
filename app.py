@@ -3,7 +3,7 @@
     streamlit run app.py
 
 Opens on a provider chooser, then themes the rest of the session to match.
-Uploaded files are parsed in memory and deleted immediately after parsing.
+Uploaded files are parsed entirely in memory and never written to disk.
 
 Note on branding: the colours below are approximations of each provider's
 brand palette, used to make the two flows visually distinct. No provider logos
@@ -13,9 +13,9 @@ or trademarks are reproduced. See the README before changing this.
 from __future__ import annotations
 
 import base64
+import io
 import mimetypes
 import sys
-import tempfile
 from pathlib import Path
 
 import streamlit as st
@@ -23,6 +23,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from mobile_money import analysis  # noqa: E402
+from mobile_money.categories import USER_RULES_FILE, load_user_rules  # noqa: E402
 from mobile_money.parsers import StatementError, parse_many  # noqa: E402
 
 st.set_page_config(
@@ -363,9 +364,10 @@ def analysis_view() -> None:
         st.header("Statement")
         uploads = st.file_uploader(
             "Upload both statements" if accepts_many else f"Upload your {config['label']} statement",
-            type=["pdf"],
+            type=["pdf", "csv"],
             accept_multiple_files=accepts_many,
-            help="Parsed in memory. The file is deleted as soon as it is read.",
+            help="Parsed entirely in memory — never written to disk. "
+            "A CSV exported from this tool works too.",
         )
         password = st.text_input(
             "Password (if protected)",
@@ -383,22 +385,18 @@ def analysis_view() -> None:
     if not isinstance(uploads, list):
         uploads = [uploads]
 
-    paths: list[str] = []
+    # In-memory file objects go straight to the parsers; nothing hits disk.
+    buffers = []
     for upload in uploads:
-        handle = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-        handle.write(upload.getvalue())
-        handle.flush()
-        handle.close()
-        paths.append(handle.name)
+        buffer = io.BytesIO(upload.getvalue())
+        buffer.name = upload.name
+        buffers.append(buffer)
 
     try:
-        statement = parse_many(paths, password=password or None)
+        statement = parse_many(buffers, password=password or None)
     except StatementError as exc:
         st.error(str(exc))
         st.stop()
-    finally:
-        for path in paths:
-            Path(path).unlink(missing_ok=True)
 
     # Guard against uploading the wrong provider's statement.
     providers = set(statement.transactions["provider"].unique())
@@ -409,7 +407,12 @@ def analysis_view() -> None:
             f"{', '.join(sorted(providers))} statement. Showing it anyway."
         )
 
-    frame = analysis.prepare(statement.transactions)
+    try:
+        extra_rules = load_user_rules()
+    except ValueError as exc:
+        st.warning(str(exc))
+        extra_rules = []
+    frame = analysis.prepare(statement.transactions, extra_rules=extra_rules)
 
     # Period filter: the whole dashboard scopes to the chosen dates.
     first_day = frame["completion_time"].min().date()
@@ -488,6 +491,12 @@ def analysis_view() -> None:
         and frame["balance"].notna().any()
         and (frame["balance"].fillna(0) != 0).any()
     )
+    regular = analysis.recurring(frame)
+    borrowing = analysis.loans(frame)
+    if not borrowing.empty:
+        names.insert(2, "Loans & savings")
+    if not regular.empty:
+        names.insert(2, "Regular payments")
     if has_balance:
         names.insert(2, "Balance")
     if multi:
@@ -516,6 +525,32 @@ def analysis_view() -> None:
         st.bar_chart(spending["spent"], height=380, color=config["accent"])
         show_table(table, "by_category.csv")
 
+        # When 'Other' dominates, show what is hiding in it and how to fix it.
+        other = table[table["category"] == "Other"]
+        if not other.empty and float(other.iloc[0]["share_of_spend"]) > 20:
+            with st.expander(
+                f"'Other' is {other.iloc[0]['share_of_spend']:.0f}% of your "
+                "spend — what's in it?"
+            ):
+                unknown = frame[
+                    (frame["category"] == "Other") & (frame["withdrawn"] > 0)
+                ]
+                top_unknown = (
+                    unknown.groupby("counterparty")["withdrawn"]
+                    .agg(["sum", "count"])
+                    .rename(columns={"sum": "spent", "count": "transactions"})
+                    .sort_values("spent", ascending=False)
+                    .head(15)
+                    .reset_index()
+                )
+                st.dataframe(top_unknown, use_container_width=True, hide_index=True)
+                st.caption(
+                    f"Teach the analyser: add rules to `{USER_RULES_FILE}` as "
+                    'JSON, e.g. `{"mama mboga": "Groceries & Shopping", '
+                    '"j\\\\. otieno": "Rent"}`. Patterns are regexes matched '
+                    "against the details text."
+                )
+
     with panels["Monthly trend"]:
         months = analysis.monthly(frame).set_index("month")
         st.line_chart(months[["money_in", "money_out"]], height=340)
@@ -542,6 +577,37 @@ def analysis_view() -> None:
                 f"on {lowest.date()}. "
                 f"Highest: {money(float(balance.max()))}."
             )
+
+    if not regular.empty:
+        with panels["Regular payments"]:
+            commitment = float(regular["monthly_commitment"].sum())
+            st.metric("Monthly commitment", money(commitment))
+            st.caption(
+                "Payments made in 3+ months with steady amounts — rent, "
+                "school fees, subscriptions, chama contributions."
+            )
+            st.bar_chart(
+                regular.set_index("counterparty")["monthly_commitment"],
+                height=340,
+                color=config["accent"],
+            )
+            show_table(regular, "regular_payments.csv")
+
+    if not borrowing.empty:
+        with panels["Loans & savings"]:
+            st.caption(
+                "Money moving between your wallet and credit or savings "
+                "products. For Fuliza, 'to you' is borrowed and 'from you' "
+                "repaid; for savings it reads the other way."
+            )
+            show_table(borrowing, "loans_savings.csv")
+            fuliza = borrowing[borrowing["product"] == "Fuliza"]
+            if not fuliza.empty and float(fuliza.iloc[0]["fees"]) > 0:
+                row = fuliza.iloc[0]
+                st.warning(
+                    f"Fuliza fees: {money(float(row['fees']))} on "
+                    f"{money(float(row['to_you']))} borrowed."
+                )
 
     with panels["People"]:
         paying, receiving = st.columns(2)

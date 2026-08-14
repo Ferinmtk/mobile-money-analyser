@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from .analysis import (
@@ -14,12 +15,15 @@ from .analysis import (
     by_category,
     forecast_next_month,
     insights,
+    loans,
     monthly,
     overview,
     prepare,
+    recurring,
     top_counterparties,
 )
-from .parsers import StatementError, parse_many, parse_statement
+from .categories import load_user_rules
+from .parsers import PROVIDERS, StatementError, parse_many, parse_statement
 
 
 def _money(value: float | None) -> str:
@@ -49,10 +53,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--provider",
-        choices=["mpesa", "airtel"],
+        choices=sorted(PROVIDERS),
         help="Force a parser instead of detecting the provider",
     )
     parser.add_argument("--csv", help="Also write the parsed transactions to this CSV")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the full analysis as JSON instead of the report",
+    )
+    parser.add_argument(
+        "--rules",
+        help="Path to a JSON file of extra categorisation rules "
+        "(default: ~/.mobile-money/rules.json if it exists)",
+    )
     parser.add_argument(
         "--top",
         type=int,
@@ -76,8 +90,43 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    frame = prepare(statement.transactions)
+    try:
+        extra_rules = load_user_rules(args.rules)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    frame = prepare(statement.transactions, extra_rules=extra_rules)
     stats = overview(frame)
+
+    if args.json:
+        payload = {
+            "statement": {
+                "source": statement.source,
+                "provider": statement.provider,
+                "account": statement.account,
+                "pages": statement.pages,
+                "warnings": statement.warnings,
+            },
+            "overview": stats,
+            "by_provider": by_provider(frame).to_dict(orient="records"),
+            "by_category": by_category(frame).to_dict(orient="records"),
+            "monthly": monthly(frame).to_dict(orient="records"),
+            "top_counterparties": top_counterparties(frame, args.top).to_dict(
+                orient="records"
+            ),
+            "top_sources": top_counterparties(
+                frame, args.top, direction="in"
+            ).to_dict(orient="records"),
+            "recurring": recurring(frame).to_dict(orient="records"),
+            "loans": loans(frame).to_dict(orient="records"),
+            "forecast": forecast_next_month(frame),
+            "insights": insights(frame),
+        }
+        print(json.dumps(payload, indent=2, default=str))
+        if args.csv:
+            frame.to_csv(args.csv, index=False)
+        return 0
 
     _rule(f"{statement.provider} — {statement.source}")
     if statement.account:
@@ -124,6 +173,25 @@ def main(argv: list[str] | None = None) -> int:
     for _, row in top_counterparties(frame, args.top).iterrows():
         print(f"{row['counterparty']:<34} {_money(row['spent']):>16}  "
               f"({int(row['transactions'])} txns)")
+
+    regular = recurring(frame)
+    if not regular.empty:
+        _rule("Regular payments")
+        for _, row in regular.iterrows():
+            print(
+                f"{row['counterparty']:<34} {_money(row['monthly_commitment']):>16}"
+                f"/month  ({int(row['months'])} months)"
+            )
+
+    borrowing = loans(frame)
+    if not borrowing.empty:
+        _rule("Loans & savings")
+        for _, row in borrowing.iterrows():
+            print(
+                f"{row['product']:<22} to you {_money(row['to_you']):>14}  "
+                f"from you {_money(row['from_you']):>14}  "
+                f"fees {_money(row['fees']):>12}"
+            )
 
     _rule("Insights")
     for note in insights(frame):

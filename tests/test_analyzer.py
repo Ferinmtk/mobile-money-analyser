@@ -18,8 +18,10 @@ from mobile_money.parsers import (  # noqa: E402
     airtel,
     identify,
     mpesa,
+    parse_csv,
     parse_many,
     parse_statement,
+    tkash,
 )
 from mobile_money.parsers.base import (  # noqa: E402
     normalise,
@@ -146,7 +148,7 @@ def test_missing_file_raises() -> None:
 
 def test_unknown_provider_raises(mpesa_pdf: Path) -> None:
     with pytest.raises(StatementError):
-        parse_statement(mpesa_pdf, provider="tkash")
+        parse_statement(mpesa_pdf, provider="equitel")
 
 
 # --- merging ---------------------------------------------------------------
@@ -466,3 +468,205 @@ def test_summaries_agree_on_totals(frame: pd.DataFrame) -> None:
     assert analysis.monthly(frame)["money_out"].sum() == pytest.approx(
         stats["money_out"]
     )
+
+
+# --- T-Kash, CSV and in-memory input ----------------------------------------
+
+@pytest.fixture(scope="session")
+def tkash_pdf(tmp_path_factory) -> Path:
+    out = tmp_path_factory.mktemp("data") / "tkash.pdf"
+    _run("make_sample_tkash_statement.py", str(out))
+    return out
+
+
+def test_identifies_and_parses_tkash(tkash_pdf: Path) -> None:
+    assert identify(tkash_pdf) == "tkash"
+    statement = parse_statement(tkash_pdf)
+    assert statement.provider == "T-Kash"
+    assert len(statement) > 80
+    assert analysis.reconcile(analysis.prepare(statement.transactions)) is not None
+
+
+def test_tkash_detection_needs_the_brand_in_the_header() -> None:
+    body = "\n".join(["Receipt No Completion Time Details"] * 20)
+    assert not tkash.detect(body + "\nSend Money to T-Kash 254770000111")
+    assert tkash.detect("TELKOM KENYA\nT-KASH STATEMENT")
+
+
+def test_csv_round_trip(mpesa_pdf: Path, tmp_path: Path) -> None:
+    """A CSV exported from the app can be re-analysed with identical totals."""
+    original = analysis.prepare(parse_statement(mpesa_pdf).transactions)
+    out = tmp_path / "transactions.csv"
+    original[
+        ["completion_time", "provider", "details", "status",
+         "paid_in", "withdrawn", "balance"]
+    ].to_csv(out, index=False)
+
+    reparsed = parse_csv(out)
+    assert len(reparsed) == len(original)
+    assert reparsed.transactions["paid_in"].sum() == pytest.approx(
+        original["paid_in"].sum()
+    )
+    assert set(reparsed.transactions["provider"]) == {"M-Pesa"}
+
+
+def test_csv_goes_through_parse_statement(mpesa_pdf: Path, tmp_path: Path) -> None:
+    original = parse_statement(mpesa_pdf).transactions
+    out = tmp_path / "export.csv"
+    original.to_csv(out, index=False)
+    assert len(parse_statement(out)) == len(original)
+
+
+def test_unreadable_csv_raises(tmp_path: Path) -> None:
+    out = tmp_path / "junk.csv"
+    out.write_text("a,b\n1,2\n")
+    with pytest.raises(StatementError):
+        parse_csv(out)
+
+
+def test_parses_in_memory_file(mpesa_pdf: Path) -> None:
+    """The dashboard hands parsers a BytesIO — no temp files on disk."""
+    import io
+
+    buffer = io.BytesIO(mpesa_pdf.read_bytes())
+    buffer.name = "statement.pdf"
+    statement = parse_statement(buffer)
+    assert statement.provider == "M-Pesa"
+    assert statement.source == "statement.pdf"
+    assert len(statement) > 100
+
+
+# --- user rules -------------------------------------------------------------
+
+def test_user_rules_override_builtins(tmp_path: Path) -> None:
+    rules_file = tmp_path / "rules.json"
+    rules_file.write_text('{"mama mboga": "Groceries & Shopping", "naivas": "Rent"}')
+    extra = categories.load_user_rules(rules_file)
+    assert categories.categorise_one("MAMA MBOGA KIBERA", extra) == "Groceries & Shopping"
+    # User rules win over the builtin Naivas -> Groceries rule.
+    assert categories.categorise_one("Merchant Payment NAIVAS", extra) == "Rent"
+    # Without extras, builtins still apply.
+    assert categories.categorise_one("Merchant Payment NAIVAS") == "Groceries & Shopping"
+
+
+def test_missing_rules_file_means_no_rules(tmp_path: Path) -> None:
+    assert categories.load_user_rules(tmp_path / "absent.json") == []
+
+
+def test_broken_rules_file_raises(tmp_path: Path) -> None:
+    bad = tmp_path / "rules.json"
+    bad.write_text("not json")
+    with pytest.raises(ValueError):
+        categories.load_user_rules(bad)
+
+
+# --- recurring, loans and self-transfers ------------------------------------
+
+def _synthetic(rows: list[tuple[str, str, float, float, str]]) -> pd.DataFrame:
+    """(time, details, paid_in, withdrawn, provider) -> prepared frame."""
+    frame = pd.DataFrame(
+        {
+            "receipt_no": [f"R{i:04d}XXAA{i%7}Z" for i in range(len(rows))],
+            "completion_time": pd.to_datetime([r[0] for r in rows]),
+            "details": [r[1] for r in rows],
+            "status": "COMPLETED",
+            "paid_in": [r[2] for r in rows],
+            "withdrawn": [r[3] for r in rows],
+            "balance": pd.NA,
+            "provider": [r[4] for r in rows],
+        }
+    )
+    return analysis.prepare(frame)
+
+
+def test_recurring_finds_steady_monthly_payments() -> None:
+    rows = [
+        (f"2026-0{month}-05 09:00", "Customer Transfer to 254700111222 - LANDLORD KAMAU",
+         0.0, 25000.0, "M-Pesa")
+        for month in range(1, 5)
+    ] + [
+        ("2026-01-20 12:00", "Merchant Payment Online to 5401 - NAIVAS", 0.0, 8000.0, "M-Pesa"),
+    ]
+    regular = analysis.recurring(_synthetic(rows))
+    assert list(regular["counterparty"]) == ["LANDLORD KAMAU"]
+    assert regular.iloc[0]["monthly_commitment"] == pytest.approx(25000.0)
+    assert regular.iloc[0]["months"] == 4
+
+
+def test_recurring_ignores_erratic_amounts() -> None:
+    rows = [
+        (f"2026-0{month}-05 09:00", "Customer Transfer to 254700111222 - LANDLORD KAMAU",
+         0.0, amount, "M-Pesa")
+        for month, amount in [(1, 2000.0), (2, 30000.0), (3, 500.0), (4, 12000.0)]
+    ]
+    assert analysis.recurring(_synthetic(rows)).empty
+
+
+def test_loans_split_fuliza_fees_from_repayments() -> None:
+    rows = [
+        ("2026-01-05 09:00", "OD Loan Repayment to Fuliza M-Pesa", 0.0, 1000.0, "M-Pesa"),
+        ("2026-01-04 09:00", "Fuliza M-Pesa amount borrowed", 950.0, 0.0, "M-Pesa"),
+        ("2026-01-05 09:01", "Fuliza M-Pesa access fee", 0.0, 25.0, "M-Pesa"),
+        ("2026-01-08 10:00", "M-Shwari Deposit", 0.0, 5000.0, "M-Pesa"),
+    ]
+    borrowing = analysis.loans(_synthetic(rows))
+    fuliza = borrowing[borrowing["product"] == "Fuliza"].iloc[0]
+    assert fuliza["to_you"] == pytest.approx(950.0)
+    assert fuliza["from_you"] == pytest.approx(1000.0)
+    assert fuliza["fees"] == pytest.approx(25.0)
+    assert "M-Shwari" in set(borrowing["product"])
+
+
+def test_self_transfers_are_excluded_from_totals() -> None:
+    rows = [
+        ("2026-01-05 09:00", "Send Money to Other Network 254730000987",
+         0.0, 5000.0, "M-Pesa"),
+        ("2026-01-05 09:03", "Money Received from 254712000111 SELF",
+         5000.0, 0.0, "Airtel Money"),
+        ("2026-01-06 11:00", "Merchant Payment NAIVAS", 0.0, 1200.0, "Airtel Money"),
+    ]
+    frame = _synthetic(rows)
+    assert frame["self_transfer"].sum() == 2
+    stats = analysis.overview(frame)
+    assert stats["money_out"] == pytest.approx(1200.0)
+    assert stats["money_in"] == pytest.approx(0.0)
+
+
+def test_single_provider_never_marks_self_transfers() -> None:
+    rows = [
+        ("2026-01-05 09:00", "Send Money to Other Network 254730000987",
+         0.0, 5000.0, "M-Pesa"),
+        ("2026-01-05 09:03", "Money Received from 254712000111", 5000.0, 0.0, "M-Pesa"),
+    ]
+    assert not _synthetic(rows)["self_transfer"].any()
+
+
+# --- CLI --------------------------------------------------------------------
+
+def test_cli_json_output(mpesa_pdf: Path, capsys) -> None:
+    import json
+
+    from mobile_money.cli import main
+
+    assert main([str(mpesa_pdf), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["statement"]["provider"] == "M-Pesa"
+    assert payload["overview"]["transactions"] > 100
+    assert isinstance(payload["by_category"], list)
+    assert isinstance(payload["insights"], list)
+
+
+def test_cli_missing_file_exits_nonzero() -> None:
+    from mobile_money.cli import main
+
+    assert main(["does_not_exist.pdf"]) == 1
+
+
+def test_cli_writes_csv(mpesa_pdf: Path, tmp_path: Path) -> None:
+    from mobile_money.cli import main
+
+    out = tmp_path / "out.csv"
+    assert main([str(mpesa_pdf), "--csv", str(out)]) == 0
+    assert out.exists()
+    header = out.read_text().splitlines()[0]
+    assert "completion_time" in header and "withdrawn" in header
