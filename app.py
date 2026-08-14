@@ -410,6 +410,29 @@ def analysis_view() -> None:
         )
 
     frame = analysis.prepare(statement.transactions)
+
+    # Period filter: the whole dashboard scopes to the chosen dates.
+    first_day = frame["completion_time"].min().date()
+    last_day = frame["completion_time"].max().date()
+    with st.sidebar:
+        st.divider()
+        chosen_period = st.date_input(
+            "Period",
+            value=(first_day, last_day),
+            min_value=first_day,
+            max_value=last_day,
+            help="Everything below — totals, charts, insights — covers only these dates.",
+        )
+    if isinstance(chosen_period, tuple) and len(chosen_period) == 2:
+        start, end = chosen_period
+        frame = frame[
+            (frame["completion_time"].dt.date >= start)
+            & (frame["completion_time"].dt.date <= end)
+        ]
+    if frame.empty:
+        st.info("No transactions in the chosen period.")
+        st.stop()
+
     stats = analysis.overview(frame)
 
     left, middle, right, far_right = st.columns(4)
@@ -423,37 +446,75 @@ def analysis_view() -> None:
         delta_color="inverse",
     )
 
-    caption = (
-        f"{stats['transactions']} transactions from {stats['first']} to {stats['last']}"
-    )
-    if stats["closing_balance"] is not None:
-        caption += f" · closing balance {money(stats['closing_balance'])}"
+    left, middle, right, far_right = st.columns(4)
+    left.metric("Closing balance", money(stats["closing_balance"]))
+    middle.metric("Avg daily spend", money(stats["avg_daily_spend"]))
+    right.metric("Days covered", f"{stats['days_covered']}")
+    far_right.metric("Transactions", f"{stats['transactions']}")
+
+    caption = f"From {stats['first'][:10]} to {stats['last'][:10]}"
+    if stats["not_settled"]:
+        caption += (
+            f" · {stats['not_settled']} failed/pending/reversed transaction(s) "
+            "excluded from totals"
+        )
     st.caption(caption)
 
     for warning in statement.warnings:
         st.warning(warning)
 
+    # Balance reconciliation: each row's balance should move by exactly the
+    # transaction amount. Mismatches usually mean rows were missed or misread.
+    check = analysis.reconcile(frame)
+    if check and check["checked"]:
+        if check["mismatched"] > check["checked"] * 0.05:
+            st.warning(
+                f"{check['mismatched']} of {check['checked']} rows do not line "
+                "up with the running balance. Some transactions may be missing "
+                "or misread — treat the totals as approximate."
+            )
+        else:
+            good = check["checked"] - check["mismatched"]
+            st.caption(f"Balance check: {good} of {check['checked']} rows reconcile.")
+
     st.subheader("What we noticed")
     for note in analysis.insights(frame):
         st.write(f"- {note}")
 
-    names = ["Categories", "Monthly trend", "Who you pay", "Transactions"]
+    names = ["Categories", "Monthly trend", "People", "When you spend", "Transactions"]
     multi = frame["provider"].nunique() > 1
+    has_balance = (
+        not multi
+        and frame["balance"].notna().any()
+        and (frame["balance"].fillna(0) != 0).any()
+    )
+    if has_balance:
+        names.insert(2, "Balance")
     if multi:
         names.insert(0, "By provider")
     panels = dict(zip(names, st.tabs(names)))
+
+    def show_table(table, filename: str) -> None:
+        st.dataframe(table, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download CSV",
+            data=table.to_csv(index=False).encode("utf-8"),
+            file_name=filename,
+            mime="text/csv",
+            key=f"download_{filename}",
+        )
 
     if multi:
         with panels["By provider"]:
             split = analysis.by_provider(frame)
             st.bar_chart(split.set_index("provider")[["money_in", "money_out"]])
-            st.dataframe(split, use_container_width=True, hide_index=True)
+            show_table(split, "by_provider.csv")
 
     with panels["Categories"]:
         table = analysis.by_category(frame)
         spending = table[table["spent"] > 0].set_index("category")
         st.bar_chart(spending["spent"], height=380, color=config["accent"])
-        st.dataframe(table, use_container_width=True, hide_index=True)
+        show_table(table, "by_category.csv")
 
     with panels["Monthly trend"]:
         months = analysis.monthly(frame).set_index("month")
@@ -466,13 +527,67 @@ def analysis_view() -> None:
                 f"— {projection['method']}, {projection['confidence']} confidence, "
                 f"based on {projection.get('months_used', 0)} months."
             )
+        show_table(months.reset_index(), "monthly.csv")
 
-    with panels["Who you pay"]:
-        top = analysis.top_counterparties(frame, limit=15)
-        st.bar_chart(
-            top.set_index("counterparty")["spent"], height=380, color=config["accent"]
-        )
-        st.dataframe(top, use_container_width=True, hide_index=True)
+    if has_balance:
+        with panels["Balance"]:
+            balance = (
+                frame.dropna(subset=["balance"])
+                .set_index("completion_time")["balance"]
+            )
+            st.line_chart(balance, height=380, color=config["accent"])
+            lowest = balance.idxmin()
+            st.caption(
+                f"Lowest point: {money(float(balance.min()))} "
+                f"on {lowest.date()}. "
+                f"Highest: {money(float(balance.max()))}."
+            )
+
+    with panels["People"]:
+        paying, receiving = st.columns(2)
+        with paying:
+            st.markdown("**Who you pay**")
+            top = analysis.top_counterparties(frame, limit=15)
+            st.bar_chart(
+                top.set_index("counterparty")["spent"],
+                height=340,
+                color=config["accent"],
+            )
+            show_table(top, "who_you_pay.csv")
+        with receiving:
+            st.markdown("**Who pays you**")
+            sources = analysis.top_counterparties(frame, limit=15, direction="in")
+            st.bar_chart(
+                sources.set_index("counterparty")["received"],
+                height=340,
+                color=config["accent_deep"],
+            )
+            show_table(sources, "who_pays_you.csv")
+
+    with panels["When you spend"]:
+        weekday_col, hour_col = st.columns(2)
+        with weekday_col:
+            st.markdown("**By day of the week**")
+            week = analysis.by_weekday(frame)
+            # Streamlit sorts a text axis alphabetically; the number prefix
+            # keeps Monday first.
+            week["weekday"] = [
+                f"{i + 1}. {name[:3]}" for i, name in enumerate(week["weekday"])
+            ]
+            st.bar_chart(
+                week.set_index("weekday")["spent"], height=320, color=config["accent"]
+            )
+        with hour_col:
+            st.markdown("**By hour of the day**")
+            hours = analysis.by_hour(frame).set_index("hour")
+            st.bar_chart(hours["spent"], height=320, color=config["accent"])
+        busiest = analysis.by_weekday(frame)
+        if float(busiest["spent"].sum()) > 0:
+            peak = busiest.loc[busiest["spent"].idxmax()]
+            st.caption(
+                f"Most spending happens on {peak['weekday']}s "
+                f"({money(float(peak['spent']))} across the period)."
+            )
 
     with panels["Transactions"]:
         columns = [
@@ -481,6 +596,7 @@ def analysis_view() -> None:
             "details",
             "category",
             "counterparty",
+            "status",
             "paid_in",
             "withdrawn",
         ]
@@ -488,19 +604,31 @@ def analysis_view() -> None:
             columns.append("balance")
         display = frame[columns]
 
-        chosen = st.multiselect(
-            "Filter by category", sorted(frame["category"].unique()), default=[]
-        )
+        search_col, category_col, status_col = st.columns([2, 2, 1])
+        with search_col:
+            query = st.text_input(
+                "Search", placeholder="Name, till, paybill, anything in the details…"
+            )
+        with category_col:
+            chosen = st.multiselect(
+                "Category", sorted(frame["category"].unique()), default=[]
+            )
+        with status_col:
+            statuses = st.multiselect(
+                "Status", sorted(frame["status"].unique()), default=[]
+            )
+
+        if query:
+            hit = display["details"].str.contains(query, case=False, regex=False)
+            hit |= display["counterparty"].str.contains(query, case=False, regex=False)
+            display = display[hit]
         if chosen:
             display = display[display["category"].isin(chosen)]
+        if statuses:
+            display = display[display["status"].isin(statuses)]
 
-        st.dataframe(display, use_container_width=True, hide_index=True)
-        st.download_button(
-            "Download as CSV",
-            data=display.to_csv(index=False).encode("utf-8"),
-            file_name="transactions.csv",
-            mime="text/csv",
-        )
+        st.caption(f"{len(display)} of {len(frame)} transactions")
+        show_table(display, "transactions.csv")
 
 
 if "provider" not in st.session_state:

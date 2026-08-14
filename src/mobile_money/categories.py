@@ -16,7 +16,13 @@ import pandas as pd
 
 # (category, compiled pattern). Order matters.
 RULES: list[tuple[str, re.Pattern[str]]] = [
-    ("Charges & Fees", re.compile(r"\b(charge|fee|excise duty|levy)\b", re.I)),
+    # "fees" (plural) is ambiguous — school fees are Education — so the plural
+    # only counts as a charge in an explicit transaction-charge phrase.
+    ("Charges & Fees", re.compile(
+        r"\b(charges?|fee|excise duty|lev(y|ies)|commission"
+        r"|(transaction|withdrawal|transfer|access|service|pay ?bill|bank) fees)\b",
+        re.I,
+    )),
     ("Reversal", re.compile(r"\breversal\b", re.I)),
     ("Airtime & Bundles", re.compile(r"\b(airtime|bundle|data|top ?up|recharge|credit purchase)\b", re.I)),
     ("Savings & Loans", re.compile(r"\b(m-?shwari|kcb m-?pesa|fuliza|loan|lock savings|overdraft|od |sacco|kopa)", re.I)),

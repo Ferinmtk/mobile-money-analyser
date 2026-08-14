@@ -65,8 +65,7 @@ def receipt() -> str:
 
 def build_rows(months: int = 6, per_month: int = 45) -> list[list[str]]:
     start = datetime(2026, 1, 3, 8, 15, 0)
-    balance = 14_200.00
-    rows: list[list[str]] = []
+    events: list[tuple[datetime, str, float, float]] = []
 
     for month in range(months):
         for _ in range(per_month + random.randint(-8, 8)):
@@ -90,23 +89,35 @@ def build_rows(months: int = 6, per_month: int = 45) -> list[list[str]]:
                 amount = round(random.uniform(low, high), 2)
                 paid_in, withdrawn = 0.0, amount
 
-            balance = round(balance + paid_in - withdrawn, 2)
-            if balance < 0:
-                balance = round(balance + 15_000, 2)  # a top-up, keeps it plausible
+            events.append((when, label, paid_in, withdrawn))
 
-            rows.append(
-                [
-                    receipt(),
-                    when.strftime("%Y-%m-%d %H:%M:%S"),
-                    label,
-                    "COMPLETED",
-                    f"{paid_in:,.2f}",
-                    f"{withdrawn:,.2f}",
-                    f"{balance:,.2f}",
-                ]
-            )
+    # The running balance is chained in chronological order so the statement
+    # reconciles: balance[n] - balance[n-1] == paid_in - withdrawn, always.
+    events.sort(key=lambda e: e[0])
+    balance = 14_200.00
+    rows: list[list[str]] = []
 
-    rows.sort(key=lambda r: r[1])
+    def emit(when: datetime, label: str, paid_in: float, withdrawn: float) -> None:
+        nonlocal balance
+        balance = round(balance + paid_in - withdrawn, 2)
+        rows.append(
+            [
+                receipt(),
+                when.strftime("%Y-%m-%d %H:%M:%S"),
+                label,
+                "COMPLETED",
+                f"{paid_in:,.2f}",
+                f"{withdrawn:,.2f}",
+                f"{balance:,.2f}",
+            ]
+        )
+
+    for when, label, paid_in, withdrawn in events:
+        if balance + paid_in - withdrawn < 0:
+            # An explicit top-up row, so the balance chain stays honest.
+            emit(when, INCOMING[0][0], 15_000.00, 0.0)
+        emit(when, label, paid_in, withdrawn)
+
     return rows
 
 

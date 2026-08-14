@@ -11,13 +11,17 @@ import re
 
 import pdfplumber
 
-from .base import Statement, StatementError, clean, normalise
+from .base import Statement, StatementError, clean, masked_account, normalise
 
 NAME = "M-Pesa"
 
 # A mention of "M-Pesa" is not enough for detection: other providers' and
 # banks' narrations reference M-Pesa constantly. This is a structural signal.
-STRUCTURE = re.compile(r"\b[A-Z0-9]{10}\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}")
+# The receipt must contain at least one letter — a plain 10-digit run next to
+# an ISO date could be another provider's numeric transaction id.
+STRUCTURE = re.compile(
+    r"\b(?=[A-Z0-9]*[A-Z])[A-Z0-9]{10}\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}"
+)
 TITLE = re.compile(r"m-?pesa\s+(full\s+)?statement", re.I)
 
 RECEIPT = re.compile(r"^[A-Z0-9]{10}$")
@@ -98,16 +102,12 @@ def parse(path, password: str | None = None) -> Statement:
     if not rows:
         raise StatementError("No M-Pesa transactions found in this file.")
 
-    account = None
-    found = re.search(r"\b(?:2547|07)\d{7,8}\b", first_page_text)
-    if found:
-        number = found.group(0)
-        account = "*" * (len(number) - 4) + number[-4:]
-
+    warnings: list[str] = []
     return Statement(
-        transactions=normalise(rows, NAME),
+        transactions=normalise(rows, NAME, warnings),
         source=str(path),
         provider=NAME,
         pages=pages,
-        account=account,
+        account=masked_account(first_page_text),
+        warnings=warnings,
     )

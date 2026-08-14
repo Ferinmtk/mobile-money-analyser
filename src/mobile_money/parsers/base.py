@@ -117,6 +117,19 @@ def to_datetime(value: str) -> datetime | None:
     return None if pd.isna(parsed) else parsed.to_pydatetime()
 
 
+# Kenyan MSISDNs: 2547xx/2541xx + 8 digits, or 07xx/01xx + 8 digits.
+PHONE = re.compile(r"\b(?:254[17]\d{8}|0[17]\d{8})\b")
+
+
+def masked_account(text: str) -> str | None:
+    """Find the account phone number in page text, masked to its last 4 digits."""
+    found = PHONE.search(text)
+    if not found:
+        return None
+    number = found.group(0)
+    return "*" * (len(number) - 4) + number[-4:]
+
+
 def clean(text: str | None) -> str:
     """Collapse whitespace and strip. Returns '' for None."""
     if text is None:
@@ -220,9 +233,27 @@ def assign_column(
 
 
 INFLOW_WORDS = re.compile(
-    r"\b(received|deposit|credit|cash in|top ?up|refund|reversal|salary|bonus)\b",
+    r"\b(received|deposit|credit|cash in|top ?up|refund|reversal|salary|bonus"
+    r"|(payment|transfer|funds|money) from)\b",
     re.I,
 )
+
+# Providers spell settlement states differently; analysis only understands
+# COMPLETED / FAILED / PENDING / REVERSED.
+STATUS_SYNONYMS = {
+    "SUCCESS": "COMPLETED",
+    "SUCCESSFUL": "COMPLETED",
+    "TS": "COMPLETED",
+    "COMPLETED TRANSACTION": "COMPLETED",
+    "PROCESSED": "COMPLETED",
+    "PAID": "COMPLETED",
+    "TF": "FAILED",
+    "FAILURE": "FAILED",
+    "DECLINED": "FAILED",
+    "CANCELLED": "FAILED",
+    "REVERSED TRANSACTION": "REVERSED",
+    "IN PROGRESS": "PENDING",
+}
 
 
 def split_amount(amount: float, details: str) -> tuple[float, float]:
@@ -238,8 +269,15 @@ def split_amount(amount: float, details: str) -> tuple[float, float]:
     return (0.0, amount) if amount else (0.0, 0.0)
 
 
-def normalise(rows: list[dict], provider: str) -> pd.DataFrame:
-    """Turn raw parser output into the normalised frame."""
+def normalise(
+    rows: list[dict], provider: str, warnings: list[str] | None = None
+) -> pd.DataFrame:
+    """Turn raw parser output into the normalised frame.
+
+    When a `warnings` list is passed, rows that had to be discarded (no
+    parseable date, or an amount that could not be read) are counted into it
+    rather than vanishing silently.
+    """
     if not rows:
         return pd.DataFrame(
             columns=COLUMNS + ["amount", "direction", "provider"]
@@ -251,29 +289,63 @@ def normalise(rows: list[dict], provider: str) -> pd.DataFrame:
             frame[column] = None
 
     frame["completion_time"] = pd.to_datetime(frame["completion_time"], errors="coerce")
-    for column in ("paid_in", "withdrawn", "balance"):
+    for column in ("paid_in", "withdrawn"):
         frame[column] = frame[column].map(to_number)
+
+    # A balance cell the statement never printed is unknown, not zero —
+    # otherwise the dashboard would report a closing balance of KES 0.
+    def balance_or_na(value):
+        if value is None or not clean(str(value)) or clean(str(value)) in {"-", "--"}:
+            return None
+        return to_number(value)
+
+    frame["balance"] = pd.to_numeric(
+        frame["balance"].map(balance_or_na), errors="coerce"
+    )
 
     frame["withdrawn"] = frame["withdrawn"].abs()
     frame["details"] = frame["details"].map(clean)
-    frame["status"] = frame["status"].fillna("COMPLETED").astype(str).str.upper()
+    frame["status"] = (
+        frame["status"]
+        .fillna("COMPLETED")
+        .astype(str)
+        .map(clean)
+        .str.upper()
+        .replace(STATUS_SYNONYMS)
+    )
     frame["receipt_no"] = frame["receipt_no"].fillna("").astype(str).map(clean)
     frame["provider"] = provider
 
     frame["amount"] = frame["paid_in"] - frame["withdrawn"]
     frame["direction"] = frame["amount"].map(lambda v: "in" if v >= 0 else "out")
 
+    before = len(frame)
     frame = frame.dropna(subset=["completion_time"])
     frame = frame[(frame["paid_in"] != 0) | (frame["withdrawn"] != 0)]
+    dropped = before - len(frame)
+    if dropped and warnings is not None:
+        warnings.append(
+            f"{dropped} row(s) were discarded because the date or amount "
+            "could not be read. Totals may be missing those transactions."
+        )
 
-    # Only dedupe where receipt numbers exist.
+    # Dedupe on the full row identity, not receipt number alone: on real
+    # M-Pesa statements the transaction charge is a separate row that shares
+    # its parent's receipt number, and must survive.
     with_receipt = frame[frame["receipt_no"] != ""].drop_duplicates(
-        subset=["receipt_no"]
+        subset=["receipt_no", "details", "paid_in", "withdrawn"]
     )
     without_receipt = frame[frame["receipt_no"] == ""]
-    frame = pd.concat([with_receipt, without_receipt])
+    frame = pd.concat([with_receipt, without_receipt]).sort_index()
 
+    # Sort chronologically, but keep the statement's printed order within
+    # equal timestamps (a charge and its parent usually share one second) so
+    # the running balance chain stays coherent.
+    times = frame["completion_time"]
+    newest_first = len(frame) > 1 and times.iloc[0] > times.iloc[-1]
+    frame = frame.reset_index(drop=True)
+    frame["_order"] = -frame.index if newest_first else frame.index
     return (
-        frame.sort_values("completion_time")
+        frame.sort_values(["completion_time", "_order"], kind="stable")
         .reset_index(drop=True)[COLUMNS + ["amount", "direction", "provider"]]
     )

@@ -99,7 +99,27 @@ def parse_many(paths: list[str | Path], password: str | None = None) -> Statemen
         warnings.extend(statement.warnings)
         pages += statement.pages
 
-    combined = pd.concat(frames, ignore_index=True).sort_values("completion_time")
+    combined = pd.concat(frames, ignore_index=True).sort_values(
+        "completion_time", kind="stable"
+    )
+
+    # Statements with overlapping periods (Jan-Mar plus Mar-Jun) repeat the
+    # shared transactions; keep one copy of each.
+    if len(frames) > 1:
+        before = len(combined)
+        has_receipt = combined["receipt_no"] != ""
+        deduped = combined[has_receipt].drop_duplicates(
+            subset=["provider", "receipt_no", "details", "paid_in", "withdrawn"]
+        )
+        combined = pd.concat([deduped, combined[~has_receipt]]).sort_values(
+            "completion_time", kind="stable"
+        )
+        removed = before - len(combined)
+        if removed:
+            warnings.append(
+                f"{removed} transaction(s) appeared in more than one statement "
+                "and were counted once."
+            )
 
     if len(set(providers)) > 1:
         # A running balance across two wallets is meaningless.

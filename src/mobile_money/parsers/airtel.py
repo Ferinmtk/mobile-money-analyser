@@ -20,12 +20,14 @@ import re
 import pdfplumber
 
 from .base import (
+    HEADER_ALIASES,
     Statement,
     StatementError,
     assign_column,
     clean,
     column_anchors,
     lines_with_positions,
+    masked_account,
     normalise,
     split_amount,
     to_datetime,
@@ -53,10 +55,33 @@ def detect(text: str) -> bool:
     return bool(TITLE.search(text)) or bool(BRAND.search(head))
 
 
-def _rows_from_tables(page) -> list[dict]:
-    """Read a ruled table, mapping columns by their header text."""
+def _map_headers(lowered: list[str]) -> dict[str, int]:
+    """Map logical column names to cell indexes via HEADER_ALIASES."""
+    mapping: dict[str, int] = {}
+    used: set[int] = set()
+    for logical, aliases in HEADER_ALIASES.items():
+        for alias in aliases:
+            for index, cell in enumerate(lowered):
+                if index in used or not cell:
+                    continue
+                if alias in cell:
+                    mapping[logical] = index
+                    used.add(index)
+                    break
+            if logical in mapping:
+                break
+    return mapping
+
+
+def _rows_from_tables(
+    page, mapping: dict[str, int] | None
+) -> tuple[list[dict], dict[str, int] | None]:
+    """Read a ruled table, mapping columns by their header text.
+
+    `mapping` carries the last known header layout: continuation pages often
+    print the table without repeating the header row.
+    """
     rows: list[dict] = []
-    mapping: dict[str, int] | None = None
 
     for table in page.extract_tables() or []:
         for raw in table:
@@ -68,21 +93,7 @@ def _rows_from_tables(page) -> list[dict]:
             if any("balance" in c for c in lowered) and any(
                 "date" in c or "time" in c for c in lowered
             ):
-                mapping = {}
-                from .base import HEADER_ALIASES
-
-                used: set[int] = set()
-                for logical, aliases in HEADER_ALIASES.items():
-                    for alias in aliases:
-                        for index, cell in enumerate(lowered):
-                            if index in used or not cell:
-                                continue
-                            if alias in cell:
-                                mapping[logical] = index
-                                used.add(index)
-                                break
-                        if logical in mapping:
-                            break
+                mapping = _map_headers(lowered)
                 continue
 
             if not mapping:
@@ -113,18 +124,24 @@ def _rows_from_tables(page) -> list[dict]:
                     "status": cell("status") or "COMPLETED",
                     "paid_in": paid_in,
                     "withdrawn": withdrawn,
-                    "balance": to_number(cell("balance")),
+                    "balance": cell("balance"),
                 }
             )
-    return rows
+    return rows, mapping
 
 
-def _rows_from_positions(page) -> list[dict]:
-    """Fallback for statements with no ruled table, using word x positions."""
+def _rows_from_positions(
+    page, anchors: dict[str, tuple[float, float]] | None
+) -> tuple[list[dict], dict[str, tuple[float, float]] | None]:
+    """Fallback for statements with no ruled table, using word x positions.
+
+    `anchors` carries the last page's header positions so continuation pages
+    that do not repeat the header still parse.
+    """
     lines = lines_with_positions(page)
-    anchors = column_anchors(lines)
+    anchors = column_anchors(lines) or anchors
     if not anchors:
-        return []
+        return [], None
 
     rows: list[dict] = []
     for line in lines:
@@ -157,10 +174,10 @@ def _rows_from_positions(page) -> list[dict]:
                 "status": joined.get("status", "COMPLETED"),
                 "paid_in": paid_in,
                 "withdrawn": withdrawn,
-                "balance": to_number(joined.get("balance", "")),
+                "balance": joined.get("balance", ""),
             }
         )
-    return rows
+    return rows, anchors
 
 
 def parse(path, password: str | None = None) -> Statement:
@@ -168,6 +185,8 @@ def parse(path, password: str | None = None) -> Statement:
     warnings: list[str] = []
     used_positions = False
     first_page_text = ""
+    mapping: dict[str, int] | None = None
+    anchors: dict[str, tuple[float, float]] | None = None
 
     try:
         with pdfplumber.open(path, password=password) as pdf:
@@ -175,9 +194,9 @@ def parse(path, password: str | None = None) -> Statement:
             for index, page in enumerate(pdf.pages):
                 if index == 0:
                     first_page_text = page.extract_text() or ""
-                found = _rows_from_tables(page)
+                found, mapping = _rows_from_tables(page, mapping)
                 if not found:
-                    found = _rows_from_positions(page)
+                    found, anchors = _rows_from_positions(page, anchors)
                     if found:
                         used_positions = True
                 rows.extend(found)
@@ -196,17 +215,11 @@ def parse(path, password: str | None = None) -> Statement:
             "horizontal position of each value. Spot-check a few rows."
         )
 
-    account = None
-    found = re.search(r"\b(?:2547|07)\d{7,8}\b", first_page_text)
-    if found:
-        number = found.group(0)
-        account = "*" * (len(number) - 4) + number[-4:]
-
     return Statement(
-        transactions=normalise(rows, NAME),
+        transactions=normalise(rows, NAME, warnings),
         source=str(path),
         provider=NAME,
         pages=pages,
-        account=account,
+        account=masked_account(first_page_text),
         warnings=warnings,
     )
