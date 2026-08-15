@@ -79,8 +79,7 @@ def txn_id() -> str:
 
 def build_rows(layout: dict, months: int = 5, per_month: int = 28) -> list[dict]:
     start = datetime(2026, 2, 4, 8, 30, 0)
-    balance = 6_800.00
-    rows: list[dict] = []
+    events: list[tuple[datetime, str, float, float]] = []
 
     for month in range(months):
         for _ in range(per_month + random.randint(-6, 6)):
@@ -98,26 +97,37 @@ def build_rows(layout: dict, months: int = 5, per_month: int = 28) -> list[dict]
                 amount = round(random.uniform(low, high), 2)
                 paid_in, withdrawn = 0.0, amount
 
-            balance = round(balance + paid_in - withdrawn, 2)
-            if balance < 200:
-                balance = round(balance + 20_000, 2)
+            events.append((when, label, paid_in, withdrawn))
 
-            signed = paid_in if paid_in else -withdrawn
+    # Chain the running balance in chronological order so the statement
+    # reconciles row by row.
+    events.sort(key=lambda e: e[0])
+    balance = 6_800.00
+    rows: list[dict] = []
 
-            rows.append(
-                {
-                    "date": when.strftime(layout["date_fmt"]),
-                    "ref": txn_id(),
-                    "details": label,
-                    "in": f"{paid_in:,.2f}" if paid_in else "",
-                    "out": f"{withdrawn:,.2f}" if withdrawn else "",
-                    "amount": f"{signed:,.2f}",
-                    "balance": f"{balance:,.2f}",
-                    "_sort": when,
-                }
-            )
+    def emit(when: datetime, label: str, paid_in: float, withdrawn: float) -> None:
+        nonlocal balance
+        balance = round(balance + paid_in - withdrawn, 2)
+        signed = paid_in if paid_in else -withdrawn
+        rows.append(
+            {
+                "date": when.strftime(layout["date_fmt"]),
+                "ref": txn_id(),
+                "details": label,
+                "in": f"{paid_in:,.2f}" if paid_in else "",
+                "out": f"{withdrawn:,.2f}" if withdrawn else "",
+                "amount": f"{signed:,.2f}",
+                "balance": f"{balance:,.2f}",
+                "_sort": when,
+            }
+        )
 
-    rows.sort(key=lambda r: r["_sort"])
+    for when, label, paid_in, withdrawn in events:
+        if balance + paid_in - withdrawn < 200:
+            # An explicit top-up row keeps the balance chain honest.
+            emit(when, "Cash In at Agent 55231 KAREN AGENCY", 20_000.00, 0.0)
+        emit(when, label, paid_in, withdrawn)
+
     return rows
 
 

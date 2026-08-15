@@ -9,15 +9,17 @@ from __future__ import annotations
 
 import re
 
-import pdfplumber
-
-from .base import Statement, StatementError, clean, normalise
+from .base import Statement, clean, parse_pdf
 
 NAME = "M-Pesa"
 
 # A mention of "M-Pesa" is not enough for detection: other providers' and
 # banks' narrations reference M-Pesa constantly. This is a structural signal.
-STRUCTURE = re.compile(r"\b[A-Z0-9]{10}\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}")
+# The receipt must contain at least one letter — a plain 10-digit run next to
+# an ISO date could be another provider's numeric transaction id.
+STRUCTURE = re.compile(
+    r"\b(?=[A-Z0-9]*[A-Z])[A-Z0-9]{10}\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}"
+)
 TITLE = re.compile(r"m-?pesa\s+(full\s+)?statement", re.I)
 
 RECEIPT = re.compile(r"^[A-Z0-9]{10}$")
@@ -83,31 +85,10 @@ def _from_text(page) -> list[dict]:
 
 
 def parse(path, password: str | None = None) -> Statement:
-    rows: list[dict] = []
-    first_page_text = ""
-    try:
-        with pdfplumber.open(path, password=password) as pdf:
-            pages = len(pdf.pages)
-            for index, page in enumerate(pdf.pages):
-                if index == 0:
-                    first_page_text = page.extract_text() or ""
-                rows.extend(_from_tables(page) or _from_text(page))
-    except Exception as exc:
-        raise StatementError(f"Could not read M-Pesa statement: {exc}") from exc
-
-    if not rows:
-        raise StatementError("No M-Pesa transactions found in this file.")
-
-    account = None
-    found = re.search(r"\b(?:2547|07)\d{7,8}\b", first_page_text)
-    if found:
-        number = found.group(0)
-        account = "*" * (len(number) - 4) + number[-4:]
-
-    return Statement(
-        transactions=normalise(rows, NAME),
-        source=str(path),
-        provider=NAME,
-        pages=pages,
-        account=account,
+    return parse_pdf(
+        path,
+        password,
+        NAME,
+        lambda page, index: _from_tables(page) or _from_text(page),
+        "No M-Pesa transactions found in this file.",
     )

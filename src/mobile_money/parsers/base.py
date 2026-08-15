@@ -15,8 +15,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Callable
 
 import pandas as pd
+import pdfplumber
 
 COLUMNS = [
     "receipt_no",
@@ -79,7 +81,7 @@ def to_number(value: str | float | None) -> float:
     if value is None:
         return 0.0
     if isinstance(value, (int, float)):
-        return float(value)
+        return 0.0 if pd.isna(value) else float(value)
 
     text = str(value).strip()
     if not text or text in {"-", "--", "nil", "NIL", "N/A"}:
@@ -115,6 +117,19 @@ def to_datetime(value: str) -> datetime | None:
             continue
     parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
     return None if pd.isna(parsed) else parsed.to_pydatetime()
+
+
+# Kenyan MSISDNs: 2547xx/2541xx + 8 digits, or 07xx/01xx + 8 digits.
+PHONE = re.compile(r"\b(?:254[17]\d{8}|0[17]\d{8})\b")
+
+
+def masked_account(text: str) -> str | None:
+    """Find the account phone number in page text, masked to its last 4 digits."""
+    found = PHONE.search(text)
+    if not found:
+        return None
+    number = found.group(0)
+    return "*" * (len(number) - 4) + number[-4:]
 
 
 def clean(text: str | None) -> str:
@@ -219,10 +234,267 @@ def assign_column(
     return best
 
 
+# --- shared parse scaffolding ----------------------------------------------
+
+
+def open_pdf(path, password: str | None = None):
+    """Open a PDF, translating encryption errors into a clear message.
+
+    Used by every parser so a wrong or missing password reads the same
+    whether the provider was detected or forced.
+    """
+    if hasattr(path, "seek"):
+        path.seek(0)
+    try:
+        return pdfplumber.open(path, password=password)
+    except Exception as exc:
+        message = str(exc).lower()
+        if "password" in message or "encrypt" in message:
+            hint = (
+                "the password given did not work"
+                if password
+                else "pass the password"
+            )
+            raise StatementError(
+                f"This statement is password protected — {hint}. For M-Pesa it "
+                "is usually the ID number the line is registered to."
+            ) from exc
+        raise StatementError(f"Could not open this statement: {exc}") from exc
+
+
+def source_name(path) -> str:
+    """A display name for a path or an in-memory file object."""
+    name = getattr(path, "name", None) or str(path)
+    return str(name)
+
+
+def parse_pdf(
+    path,
+    password: str | None,
+    provider: str,
+    page_rows: Callable,
+    no_rows_message: str,
+) -> Statement:
+    """The parse loop every PDF provider shares.
+
+    `page_rows(page, index)` returns one page's raw row dicts; providers keep
+    any cross-page state (header mappings, anchors) in a closure.
+    """
+    rows: list[dict] = []
+    first_page_text = ""
+
+    try:
+        with open_pdf(path, password) as pdf:
+            pages = len(pdf.pages)
+            for index, page in enumerate(pdf.pages):
+                if index == 0:
+                    first_page_text = page.extract_text() or ""
+                rows.extend(page_rows(page, index))
+    except StatementError:
+        raise
+    except Exception as exc:
+        raise StatementError(
+            f"Could not read {provider} statement: {exc}"
+        ) from exc
+
+    if not rows:
+        raise StatementError(no_rows_message)
+
+    warnings: list[str] = []
+    return Statement(
+        transactions=normalise(rows, provider, warnings),
+        source=source_name(path),
+        provider=provider,
+        pages=pages,
+        account=masked_account(first_page_text),
+        warnings=warnings,
+    )
+
+
+def map_headers(cells: list[str]) -> dict[str, int]:
+    """Map logical column names to cell indexes via HEADER_ALIASES."""
+    lowered = [c.lower().replace("_", " ") for c in cells]
+    mapping: dict[str, int] = {}
+    used: set[int] = set()
+    for logical, aliases in HEADER_ALIASES.items():
+        for alias in aliases:
+            for index, cell in enumerate(lowered):
+                if index in used or not cell:
+                    continue
+                if alias in cell:
+                    mapping[logical] = index
+                    used.add(index)
+                    break
+            if logical in mapping:
+                break
+    return mapping
+
+
+def rows_from_tables(
+    page, mapping: dict[str, int] | None
+) -> tuple[list[dict], dict[str, int] | None]:
+    """Read a ruled table, mapping columns by their header text.
+
+    `mapping` carries the last known header layout: continuation pages often
+    print the table without repeating the header row. Provider-agnostic —
+    any statement whose headers appear in HEADER_ALIASES parses through here.
+    """
+    rows: list[dict] = []
+
+    for table in page.extract_tables() or []:
+        for raw in table:
+            cells = [clean(c) for c in raw]
+            if not any(cells):
+                continue
+
+            lowered = [c.lower() for c in cells]
+            if any("balance" in c for c in lowered) and any(
+                "date" in c or "time" in c for c in lowered
+            ):
+                mapping = map_headers(cells)
+                continue
+
+            if not mapping:
+                continue
+
+            def cell(key: str) -> str:
+                index = mapping.get(key)
+                if index is None or index >= len(cells):
+                    return ""
+                return cells[index]
+
+            when = to_datetime(cell("completion_time"))
+            if when is None:
+                continue
+
+            details = cell("details")
+            paid_in = to_number(cell("paid_in"))
+            withdrawn = abs(to_number(cell("withdrawn")))
+
+            if not paid_in and not withdrawn and "amount" in mapping:
+                paid_in, withdrawn = split_amount(to_number(cell("amount")), details)
+
+            rows.append(
+                {
+                    "receipt_no": cell("receipt_no"),
+                    "completion_time": when,
+                    "details": details,
+                    "status": cell("status") or "COMPLETED",
+                    "paid_in": paid_in,
+                    "withdrawn": withdrawn,
+                    "balance": cell("balance"),
+                }
+            )
+    return rows, mapping
+
+
+def rows_from_positions(
+    page, anchors: dict[str, tuple[float, float]] | None
+) -> tuple[list[dict], dict[str, tuple[float, float]] | None]:
+    """Fallback for statements with no ruled table, using word x positions.
+
+    `anchors` carries the last page's header positions so continuation pages
+    that do not repeat the header still parse.
+    """
+    lines = lines_with_positions(page)
+    anchors = column_anchors(lines) or anchors
+    if not anchors:
+        return [], None
+
+    rows: list[dict] = []
+    for line in lines:
+        cells: dict[str, list[str]] = {}
+        for word in line:
+            column = assign_column(word, anchors)
+            if column:
+                cells.setdefault(column, []).append(word["text"])
+
+        joined = {key: " ".join(value) for key, value in cells.items()}
+        when = to_datetime(joined.get("completion_time", ""))
+        if when is None:
+            continue
+
+        details = clean(joined.get("details", ""))
+        paid_in = to_number(joined.get("paid_in", ""))
+        withdrawn = abs(to_number(joined.get("withdrawn", "")))
+
+        if not paid_in and not withdrawn and "amount" in joined:
+            paid_in, withdrawn = split_amount(to_number(joined["amount"]), details)
+
+        if not paid_in and not withdrawn:
+            continue
+
+        rows.append(
+            {
+                "receipt_no": joined.get("receipt_no", ""),
+                "completion_time": when,
+                "details": details,
+                "status": joined.get("status", "COMPLETED"),
+                "paid_in": paid_in,
+                "withdrawn": withdrawn,
+                "balance": joined.get("balance", ""),
+            }
+        )
+    return rows, anchors
+
+
+POSITIONS_WARNING = (
+    "This statement had no ruled table, so columns were read from the "
+    "horizontal position of each value. Spot-check a few rows."
+)
+
+
+def header_mapped_parse(path, password: str | None, provider: str) -> Statement:
+    """Full parse for any provider readable via header mapping.
+
+    Tries ruled tables first, then the positional fallback, carrying header
+    state across pages. Airtel Money and T-Kash both parse through here.
+    """
+    state: dict = {"mapping": None, "anchors": None, "positions": False}
+
+    def page_rows(page, index: int) -> list[dict]:
+        found, state["mapping"] = rows_from_tables(page, state["mapping"])
+        if not found:
+            found, state["anchors"] = rows_from_positions(page, state["anchors"])
+            if found:
+                state["positions"] = True
+        return found
+
+    statement = parse_pdf(
+        path,
+        password,
+        provider,
+        page_rows,
+        f"No {provider} transactions found. Layouts vary — see the "
+        "'Adding a layout' section of the README.",
+    )
+    if state["positions"]:
+        statement.warnings.append(POSITIONS_WARNING)
+    return statement
+
+
 INFLOW_WORDS = re.compile(
-    r"\b(received|deposit|credit|cash in|top ?up|refund|reversal|salary|bonus)\b",
+    r"\b(received|deposit|credit|cash in|top ?up|refund|reversal|salary|bonus"
+    r"|(payment|transfer|funds|money) from)\b",
     re.I,
 )
+
+# Providers spell settlement states differently; analysis only understands
+# COMPLETED / FAILED / PENDING / REVERSED.
+STATUS_SYNONYMS = {
+    "SUCCESS": "COMPLETED",
+    "SUCCESSFUL": "COMPLETED",
+    "TS": "COMPLETED",
+    "COMPLETED TRANSACTION": "COMPLETED",
+    "PROCESSED": "COMPLETED",
+    "PAID": "COMPLETED",
+    "TF": "FAILED",
+    "FAILURE": "FAILED",
+    "DECLINED": "FAILED",
+    "CANCELLED": "FAILED",
+    "REVERSED TRANSACTION": "REVERSED",
+    "IN PROGRESS": "PENDING",
+}
 
 
 def split_amount(amount: float, details: str) -> tuple[float, float]:
@@ -238,8 +510,15 @@ def split_amount(amount: float, details: str) -> tuple[float, float]:
     return (0.0, amount) if amount else (0.0, 0.0)
 
 
-def normalise(rows: list[dict], provider: str) -> pd.DataFrame:
-    """Turn raw parser output into the normalised frame."""
+def normalise(
+    rows: list[dict], provider: str, warnings: list[str] | None = None
+) -> pd.DataFrame:
+    """Turn raw parser output into the normalised frame.
+
+    When a `warnings` list is passed, rows that had to be discarded (no
+    parseable date, or an amount that could not be read) are counted into it
+    rather than vanishing silently.
+    """
     if not rows:
         return pd.DataFrame(
             columns=COLUMNS + ["amount", "direction", "provider"]
@@ -251,29 +530,69 @@ def normalise(rows: list[dict], provider: str) -> pd.DataFrame:
             frame[column] = None
 
     frame["completion_time"] = pd.to_datetime(frame["completion_time"], errors="coerce")
-    for column in ("paid_in", "withdrawn", "balance"):
+    for column in ("paid_in", "withdrawn"):
         frame[column] = frame[column].map(to_number)
+
+    # A balance cell the statement never printed is unknown, not zero —
+    # otherwise the dashboard would report a closing balance of KES 0.
+    def balance_or_na(value):
+        if value is None or not clean(str(value)) or clean(str(value)) in {"-", "--"}:
+            return None
+        return to_number(value)
+
+    frame["balance"] = pd.to_numeric(
+        frame["balance"].map(balance_or_na), errors="coerce"
+    )
 
     frame["withdrawn"] = frame["withdrawn"].abs()
     frame["details"] = frame["details"].map(clean)
-    frame["status"] = frame["status"].fillna("COMPLETED").astype(str).str.upper()
+    frame["status"] = (
+        frame["status"]
+        .fillna("COMPLETED")
+        .astype(str)
+        .map(clean)
+        .str.upper()
+        .replace(STATUS_SYNONYMS)
+    )
     frame["receipt_no"] = frame["receipt_no"].fillna("").astype(str).map(clean)
-    frame["provider"] = provider
+    if "provider" in frame.columns:
+        # A CSV re-import can carry its own per-row provider; keep it.
+        frame["provider"] = (
+            frame["provider"].fillna(provider).replace("", provider)
+        )
+    else:
+        frame["provider"] = provider
 
     frame["amount"] = frame["paid_in"] - frame["withdrawn"]
     frame["direction"] = frame["amount"].map(lambda v: "in" if v >= 0 else "out")
 
+    before = len(frame)
     frame = frame.dropna(subset=["completion_time"])
     frame = frame[(frame["paid_in"] != 0) | (frame["withdrawn"] != 0)]
+    dropped = before - len(frame)
+    if dropped and warnings is not None:
+        warnings.append(
+            f"{dropped} row(s) were discarded because the date or amount "
+            "could not be read. Totals may be missing those transactions."
+        )
 
-    # Only dedupe where receipt numbers exist.
+    # Dedupe on the full row identity, not receipt number alone: on real
+    # M-Pesa statements the transaction charge is a separate row that shares
+    # its parent's receipt number, and must survive.
     with_receipt = frame[frame["receipt_no"] != ""].drop_duplicates(
-        subset=["receipt_no"]
+        subset=["receipt_no", "details", "paid_in", "withdrawn"]
     )
     without_receipt = frame[frame["receipt_no"] == ""]
-    frame = pd.concat([with_receipt, without_receipt])
+    frame = pd.concat([with_receipt, without_receipt]).sort_index()
 
+    # Sort chronologically, but keep the statement's printed order within
+    # equal timestamps (a charge and its parent usually share one second) so
+    # the running balance chain stays coherent.
+    times = frame["completion_time"]
+    newest_first = len(frame) > 1 and times.iloc[0] > times.iloc[-1]
+    frame = frame.reset_index(drop=True)
+    frame["_order"] = -frame.index if newest_first else frame.index
     return (
-        frame.sort_values("completion_time")
+        frame.sort_values(["completion_time", "_order"], kind="stable")
         .reset_index(drop=True)[COLUMNS + ["amount", "direction", "provider"]]
     )
