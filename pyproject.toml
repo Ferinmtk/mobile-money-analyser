@@ -2,8 +2,31 @@
 name = "mobile-money-analyzer"
 version = "0.2.0"
 description = "Parse M-Pesa and Airtel Money PDF statements and analyse spending"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ferrin Mutuku", email = "ferinmtk@gmail.com" }]
+keywords = ["mpesa", "airtel-money", "t-kash", "kenya", "personal-finance", "pdf", "statement"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Office/Business :: Financial",
+]
 requires-python = ">=3.10"
 dependencies = ["pandas>=2.0", "pdfplumber>=0.11"]
+
+[project.urls]
+Homepage = "https://github.com/Ferinmtk/mobile-money-analyser"
+Repository = "https://github.com/Ferinmtk/mobile-money-analyser"
+Issues = "https://github.com/Ferinmtk/mobile-money-analyser/issues"
 
 [project.optional-dependencies]
 dashboard = ["streamlit>=1.30"]
@@ -13,7 +36,7 @@ dev = ["pytest>=8.0", "reportlab>=4.0"]
 mobile-money = "mobile_money.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
