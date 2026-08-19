@@ -5,7 +5,7 @@
 <h1 align="center">Mobile Money Analyser</h1>
 
 <p align="center">
-  <strong>Parse M-Pesa and Airtel Money PDF statements in Python and see where your money actually goes.</strong><br>
+  <strong>Parse M-Pesa, Airtel Money and T-Kash PDF statements in Python and see where your money actually goes.</strong><br>
   A free, offline statement analyser for Kenya. No uploads, no accounts, no third party.
 </p>
 
@@ -53,14 +53,23 @@ Cross-network Transfer   KES  42,386.66    4.6%  ( 9 txns)
 - **Reads the PDF** — including password-protected M-Pesa statements
 - **Detects the provider** automatically — M-Pesa, Airtel Money or T-Kash —
   and re-analyses CSVs previously exported from this tool
-- **Categorises every transaction** into 18 categories tuned for Kenyan
+- **Categorises every transaction** into 19 categories tuned for Kenyan
   merchants: KPLC, Nairobi Water, Naivas, Quickmart, Fuliza, M-Shwari, DSTV
 - **Extracts the counterparty**, so you see `KPLC PREPAID` rather than
   `Pay Bill Online to 888880 - KPLC PREPAID Acc. 4471029`
-- **Tracks what the wallet cost you** — total charges as a share of spending
-- **Shows the trend** by month, with a forecast for next month
-- **Merges both wallets** into one timeline if you use M-Pesa and Airtel
-- **Exports to CSV**, and runs as either a CLI or a web dashboard
+- **Tracks what the wallet cost you** — total charges as a share of spending,
+  with a dedicated Fuliza / M-Shwari / KCB M-Pesa borrowing breakdown
+- **Finds your recurring payments** — rent, school fees, subscriptions, chama —
+  and totals your monthly commitment
+- **Verifies its own numbers** — every row's running balance is reconciled
+  against the amounts, so parsing errors surface instead of hiding
+- **Shows the trend** by month, by weekday and by hour, with a forecast
+- **Merges both wallets** into one timeline, pairing transfers between your
+  own wallets so they are not counted as income *and* spending
+- **Learns your merchants** — add your own rules in
+  `~/.mobile-money/rules.json` to claim a landlord or local shop out of 'Other'
+- **Exports to CSV or JSON**, re-analyses its own CSV exports, and runs as
+  either a CLI or a web dashboard
 
 ## Quick start
 
@@ -91,6 +100,15 @@ python -m mobile_money mpesa.pdf airtel.pdf --csv combined.csv
 
 # force a parser if detection gets it wrong
 python -m mobile_money statement.pdf --provider airtel
+
+# machine-readable: the full analysis as one JSON document
+python -m mobile_money mpesa.pdf --json | jq '.overview.money_out'
+
+# your own categorisation rules ({"regex": "Category"})
+python -m mobile_money mpesa.pdf --rules my-rules.json
+
+# re-analyse a CSV exported earlier — no PDF needed
+python -m mobile_money transactions.csv
 ```
 
 **Web dashboard**
@@ -117,12 +135,15 @@ print(by_category(frame).head())
 
 ## Screenshots
 
-> Add your own: run `streamlit run app.py`, load a sample statement, and drop
-> the images in `docs/`.
+*Captured against generated sample data. The app shows real provider logos if
+you supply them locally (see [Branding](#branding)); these use the built-in
+fallback icons so no trademarks are redistributed.*
 
-| Provider chooser | Spending breakdown |
+| Provider chooser | Statement overview |
 |---|---|
-| `docs/screenshot-landing.png` | `docs/screenshot-categories.png` |
+| ![Provider chooser](docs/screenshot-landing.png) | ![Statement overview](docs/screenshot-overview.png) |
+
+![Spending by category](docs/screenshot-categories.png)
 
 ## How it works
 
@@ -132,7 +153,8 @@ statement.pdf
      ▼
  parsers/            detect provider from the first page
      ├── mpesa.py    receipt number + ISO timestamp signature
-     └── airtel.py   header mapping, then word positions
+     ├── airtel.py   header mapping, then word positions
+     └── tkash.py    same adaptive path as Airtel
      │
      ▼
  base.normalise()    one schema regardless of provider:
@@ -187,8 +209,8 @@ Statements are financial records, so the design assumes they should never leave
 the machine they are read on.
 
 - Everything runs locally. **No network calls, no external API, no telemetry.**
-- The dashboard parses uploads in memory and deletes the temporary file
-  immediately.
+- The dashboard parses uploads entirely in memory — they are never written
+  to disk, not even as a temporary file.
 - Phone numbers are masked to the last four digits.
 - `.gitignore` blocks `*.pdf` and `*.csv`, so a real statement cannot be
   committed by accident.
@@ -248,17 +270,22 @@ Airtel exports vary. The usual fix is a column name the mapper does not know
 yet — add it to `HEADER_ALIASES` in `src/mobile_money/parsers/base.py`. Open an
 issue with the column headers and it can be added upstream.
 
-### Can I add another provider, like T-Kash?
+### Can I add another provider?
 
 Yes. Write a parser exposing `detect(text)` and `parse(path, password)` that
 returns a `Statement`, register it in `parsers/__init__.py`, and the entire
-analysis layer works unchanged.
+analysis layer works unchanged. T-Kash was added exactly this way — for a
+statement with recognisable column headers, `base.header_mapped_parse` does
+the whole job and the parser is ~40 lines.
 
 ## Roadmap
 
-- [ ] Validate the Airtel parser against real exports
-- [ ] T-Kash support
-- [ ] Recurring payment detection
+- [x] T-Kash support
+- [x] Recurring payment detection
+- [x] Fuliza / loans cost breakdown
+- [x] Balance-chain reconciliation
+- [x] User-defined categorisation rules
+- [ ] Validate the Airtel and T-Kash parsers against real exports
 - [ ] Budget targets per category
 - [ ] Hosted demo
 
@@ -285,5 +312,6 @@ trademark of Airtel. This is an independent open source tool.
 Money statement analyser · parse M-Pesa statement Python · Safaricom statement
 PDF password · Kenya personal finance tracker · mobile money spending analysis ·
 pdfplumber M-Pesa · M-Pesa transaction categorisation · Airtel Money PDF parser ·
+T-Kash statement parser · Fuliza charges tracker · recurring payments Kenya ·
 Kenyan fintech open source · M-Pesa charges calculator
 </sub>
